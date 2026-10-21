@@ -39,6 +39,21 @@ def test_add_market_implied_probs():
     total = result.loc[0, ["prob_home", "prob_draw", "prob_away"]].sum()
     assert total == pytest.approx(1.0)
 
+def test_add_market_implied_probs_removes_overround():
+    # raw probs: 1/2 + 2/7 + 1/4 = 29/28 (overround > 1)
+    matches = pd.DataFrame({
+        "odds_home": [2.0],
+        "odds_draw": [3.5],
+        "odds_away": [4.0],
+    })
+
+    result = add_market_implied_probs(matches)
+
+    # normalized = raw / (29/28): 14/29, 8/29, 7/29
+    assert result.loc[0, "prob_home"] == pytest.approx(14 / 29)
+    assert result.loc[0, "prob_draw"] == pytest.approx(8 / 29)
+    assert result.loc[0, "prob_away"] == pytest.approx(7 / 29)
+
 
 def test_compute_elo_ratings_first_match_uses_initial_rating():
     """
