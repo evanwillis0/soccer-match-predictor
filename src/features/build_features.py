@@ -120,7 +120,15 @@ def add_market_implied_probs(matches: pd.DataFrame) -> pd.DataFrame:
     market as an input feature" vs "using the market as the baseline to
     beat", since those are different experiments.
     """
-    raise NotImplementedError
+    matches = matches.copy()
+    raw_home = 1 / matches["odds_home"]
+    raw_draw = 1 / matches["odds_draw"]
+    raw_away = 1 / matches["odds_away"]
+    overround = raw_home + raw_draw + raw_away
+    matches["prob_home"] = raw_home / overround
+    matches["prob_draw"] = raw_draw / overround
+    matches["prob_away"] = raw_away / overround
+    return matches
 
 
 def build_feature_table(matches: pd.DataFrame) -> pd.DataFrame:
