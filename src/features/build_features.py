@@ -52,13 +52,24 @@ def add_head_to_head(matches: pd.DataFrame, lookback: int = 5) -> pd.DataFrame:
     raise NotImplementedError
 
 
-def add_rest_days(matches: pd.DataFrame) -> pd.DataFrame:
+def add_rest_days(matches: pd.DataFrame, max_rest_days = 14) -> pd.DataFrame:
     """
     Add `home_rest_days` / `away_rest_days`: number of days since each team's
     previous match. Fatigue/rotation is a real factor in outcome prediction
     and this is a cheap, honest feature to compute.
     """
-    raise NotImplementedError
+    matches = matches.copy()
+    home = pd.DataFrame({"match_id": matches.index, "date": matches["date"],
+                         "team": matches["home_team"], "side": "home"})
+    away = pd.DataFrame({"match_id": matches.index, "date": matches["date"],
+                         "team": matches["away_team"], "side": "away"})
+    long = pd.concat([home, away], ignore_index=True)
+    long = long.sort_values(["team", "date"])
+    long["rest_days"] = long.groupby("team")["date"].diff().dt.days
+    for side in ["home", "away"]:
+        part = long[long["side"] == side].set_index("match_id")["rest_days"]
+        matches[f"{side}_rest_days"] = part.clip(upper=max_rest_days).fillna(max_rest_days)
+    return matches
 
 
 def compute_elo_ratings(
