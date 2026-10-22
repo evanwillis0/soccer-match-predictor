@@ -16,6 +16,7 @@ import pytest
 
 from src.features.build_features import (
     add_market_implied_probs,
+    add_rest_days,
     compute_elo_ratings,
 )
 
@@ -54,6 +55,27 @@ def test_add_market_implied_probs_removes_overround():
     assert result.loc[0, "prob_draw"] == pytest.approx(8 / 29)
     assert result.loc[0, "prob_away"] == pytest.approx(7 / 29)
 
+def test_add_rest_days():
+    matches = pd.DataFrame({
+        "date": pd.to_datetime(["2024-08-10", "2024-08-14", "2024-08-20"]),
+        "home_team": ["A", "B", "A"],
+        "away_team": ["B", "C", "C"],
+    })
+    result = add_rest_days(matches)
+    assert result.loc[0, "home_rest_days"] == 14       # A's first match: no history, treated as rested
+    assert result.loc[1, "home_rest_days"] == 4        # B: Aug 10 (away) -> Aug 14
+    assert result.loc[2, "home_rest_days"] == 10       # A: Aug 10 -> Aug 20
+    assert result.loc[2, "away_rest_days"] == 6        # C: Aug 14 -> Aug 20
+
+
+def test_add_rest_days_caps_long_gaps():
+    matches = pd.DataFrame({
+        "date": pd.to_datetime(["2024-01-01", "2024-03-01"]),
+        "home_team": ["A", "A"],
+        "away_team": ["B", "C"],
+    })
+    result = add_rest_days(matches)
+    assert result.loc[1, "home_rest_days"] == 14       # a 60-day gap is capped
 
 def test_compute_elo_ratings_first_match_uses_initial_rating():
     """
