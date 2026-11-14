@@ -14,10 +14,12 @@ a team's *entire* history including future matches, or you'll leak the
 answer into your own training data.
 """
 
+from collections import defaultdict, deque
+
 import pandas as pd
 
 
-def add_rolling_form(matches: pd.DataFrame, window: int = 5) -> pd.DataFrame:
+def add_rolling_form(matches: pd.DataFrame, window: int = 5, max_gap_days: int = 120) -> pd.DataFrame:
     """
     Add columns for each team's form over their last `window` matches, computed
     *before* the current match: points earned (3/1/0), goals scored, goals
@@ -39,17 +41,89 @@ def add_rolling_form(matches: pd.DataFrame, window: int = 5) -> pd.DataFrame:
     Returns:
         matches with new form columns added
     """
-    raise NotImplementedError
+    matches = matches.copy()
+    home = pd.DataFrame({"match_id": matches.index, "date": matches["date"],
+                         "team": matches["home_team"], "side": "home",
+                         "goals_for": matches["home_goals"],
+                         "goals_against": matches["away_goals"]})
+    away = pd.DataFrame({"match_id": matches.index, "date": matches["date"],
+                         "team": matches["away_team"], "side": "away",
+                         "goals_for": matches["away_goals"],
+                         "goals_against": matches["home_goals"]})
+    long = pd.concat([home, away], ignore_index=True)
+    long["points"] = (3 * (long["goals_for"] > long["goals_against"])
+                      + 1 * (long["goals_for"] == long["goals_against"]))
+    long = long.sort_values(["team", "date"])
+    gap = long.groupby("team")["date"].diff().dt.days
+    long["stint"] = (gap > max_gap_days).groupby(long["team"]).cumsum()
+
+    stats = ["points", "goals_for", "goals_against"]
+    form = long.groupby(["team", "stint"])[stats].transform(
+        lambda s: s.shift(1).rolling(window).mean()
+    )
+    form = form.rename(columns={"points": "form_pts",
+                                "goals_for": "form_goals_for",
+                                "goals_against": "form_goals_against"})
+    long = long.join(form)
+
+    for side in ["home", "away"]:
+        part = long[long["side"] == side].set_index("match_id")[list(form.columns)]
+        part.columns = [f"{side}_{c}" for c in part.columns]
+        matches = matches.join(part)
+    return matches
 
 
-def add_head_to_head(matches: pd.DataFrame, lookback: int = 5) -> pd.DataFrame:
+def add_head_to_head(
+    matches: pd.DataFrame,
+    lookback: int = 5,
+    prior_pts: float = 1.39,
+    prior_weight: float = 2.0,
+) -> pd.DataFrame:
     """
-    Add a feature summarizing the home team's results in their last
-    `lookback` meetings against this specific opponent (e.g. average points
-    earned in that head-to-head history). Same leakage rule applies: only
+    Add `h2h_pts`: the home team's average points (3/1/0) in its last
+    `lookback` meetings with this opponent, at any venue, using only
     matches strictly before the current one.
+
+    Thin histories (promoted teams, or the dataset starting in 2016) are
+    handled by shrinking toward the league average, as if every pair had
+    `prior_weight` extra meetings that each earned `prior_pts`:
+
+        h2h_pts = (sum of H2H points + prior_pts * prior_weight) / (meetings + prior_weight)
+
+    So 0 meetings -> exactly `prior_pts`, a single win doesn't look like
+    dominance, and 5 meetings are mostly trusted. The value is always
+    defined, so there are no NaN rows to drop.
+
+    Design decisions:
+      - Any venue, not same-venue only: roughly double the sample, and home
+        advantage is already captured by Elo.
+      - prior_pts = 1.39 is league-average points per team per game on the
+        TRAINING seasons only (2016-17 to 2023-24), equal to
+        (3 - draw rate) / 2.
     """
-    raise NotImplementedError
+    matches = matches.copy()
+    history: dict[frozenset, deque] = defaultdict(lambda: deque(maxlen=lookback))
+    h2h_pts = []
+
+    for home, away, home_goals, away_goals in zip(
+        matches["home_team"], matches["away_team"], matches["home_goals"], matches["away_goals"]
+    ):
+        past = history[frozenset((home, away))]
+
+        # Feature from PAST meetings only...
+        earned = sum(meeting[home] for meeting in past)
+        h2h_pts.append((earned + prior_pts * prior_weight) / (len(past) + prior_weight))
+
+        # ...THEN record this meeting for future ones.
+        if home_goals > away_goals:
+            past.append({home: 3, away: 0})
+        elif home_goals < away_goals:
+            past.append({home: 0, away: 3})
+        else:
+            past.append({home: 1, away: 1})
+
+    matches["h2h_pts"] = h2h_pts
+    return matches
 
 
 def add_rest_days(matches: pd.DataFrame, max_rest_days = 14) -> pd.DataFrame:
@@ -77,6 +151,7 @@ def compute_elo_ratings(
     k: float = 20.0,
     initial_rating: float = 1500.0,
     home_advantage: float = 60.0,
+    season_regression: float = 0.33,
 ) -> pd.DataFrame:
     """
     Compute a running Elo rating for every team and attach each match's
@@ -100,16 +175,72 @@ def compute_elo_ratings(
     (pre-update) ratings as that match's `home_elo`/`away_elo` features,
     THEN apply the update for the next match.
 
+    Design decisions (see README "Key design decisions"):
+      - Draws count as 0.5 for both sides. Elo's job is measuring strength;
+        predicting draws is left to the classifier.
+      - Between seasons, every rating is pulled `season_regression` of the
+        way back toward `initial_rating` (summer transfers, manager changes).
+      - Promoted teams (any team not in the previous season, including
+        teams returning after relegation) start at the average rating of
+        the teams that left the league, after regression. The new season's
+        team list is known before it kicks off, so this isn't leakage.
+        Because Elo updates are zero-sum and newcomers replace leavers one
+        for one, the league-average rating stays at `initial_rating`.
+      - Teams in the first season of the dataset all start at `initial_rating`.
+
     Args:
-        matches: chronologically-sorted match table
+        matches: chronologically-sorted match table. Uses the `season`
+            column to detect season boundaries; without one, all matches
+            are treated as a single season.
         k: how much a single result moves a team's rating (higher = more volatile)
         initial_rating: starting rating for a team with no history
         home_advantage: rating points added to the home team's effective rating
+        season_regression: fraction (0-1) of the way each rating moves back
+            toward `initial_rating` between seasons. 0 = carry over fully.
 
     Returns:
         matches with `home_elo` and `away_elo` columns added
     """
-    raise NotImplementedError
+    matches = matches.copy()
+    seasons = matches["season"] if "season" in matches.columns else pd.Series(0, index=matches.index)
+    actual_home = {"H": 1.0, "D": 0.5, "A": 0.0}
+
+    ratings: dict[str, float] = {}
+    home_elo, away_elo = [], []
+    current_season = None
+
+    for season, home, away, result in zip(
+        seasons, matches["home_team"], matches["away_team"], matches["result"]
+    ):
+        if season != current_season:
+            if current_season is not None:
+                # Season boundary: regress everyone toward the mean, then
+                # swap leavers for newcomers.
+                in_league = seasons == season
+                new_teams = set(matches.loc[in_league, "home_team"]) | set(matches.loc[in_league, "away_team"])
+                ratings = {t: initial_rating + (1 - season_regression) * (r - initial_rating)
+                           for t, r in ratings.items()}
+                leavers = [ratings[t] for t in ratings if t not in new_teams]
+                newcomer_rating = sum(leavers) / len(leavers) if leavers else initial_rating
+                ratings = {t: ratings.get(t, newcomer_rating) for t in new_teams}
+            current_season = season
+
+        home_rating = ratings.setdefault(home, initial_rating)
+        away_rating = ratings.setdefault(away, initial_rating)
+
+        # Record PRE-match ratings as this match's features...
+        home_elo.append(home_rating)
+        away_elo.append(away_rating)
+
+        # ...THEN update for future matches.
+        expected_home = 1 / (1 + 10 ** ((away_rating - (home_rating + home_advantage)) / 400))
+        change = k * (actual_home[result] - expected_home)
+        ratings[home] = home_rating + change
+        ratings[away] = away_rating - change
+
+    matches["home_elo"] = home_elo
+    matches["away_elo"] = away_elo
+    return matches
 
 
 def add_market_implied_probs(matches: pd.DataFrame) -> pd.DataFrame:
@@ -142,12 +273,70 @@ def add_market_implied_probs(matches: pd.DataFrame) -> pd.DataFrame:
     return matches
 
 
-def build_feature_table(matches: pd.DataFrame) -> pd.DataFrame:
+# Columns that identify a match, kept for splitting and analysis (not features).
+ID_COLUMNS = ["date", "season", "home_team", "away_team"]
+TARGET_COLUMN = "result"
+# Market-implied probabilities: the benchmark to beat. Whether they ALSO go in
+# as model features is a separate Week 3 experiment, so they're kept apart.
+MARKET_COLUMNS = ["prob_home", "prob_draw", "prob_away"]
+FEATURE_COLUMNS = [
+    "home_form_pts", "home_form_goals_for", "home_form_goals_against",
+    "away_form_pts", "away_form_goals_for", "away_form_goals_against",
+    "home_rest_days", "away_rest_days",
+    "home_elo", "away_elo",
+    "h2h_pts",
+]
+
+# What a promoted team typically does in its first season back: per-game
+# averages over the 24 promoted team-seasons in the TRAINING seasons only
+# (2016-17 to 2023-24). Used when a team has no form history yet.
+PROMOTED_FORM_DEFAULTS = {"form_pts": 0.93, "form_goals_for": 1.00, "form_goals_against": 1.74}
+
+WARMUP_SEASONS = ("2015-16",)
+
+
+def build_feature_table(
+    matches: pd.DataFrame, warmup_seasons: tuple[str, ...] = WARMUP_SEASONS
+) -> pd.DataFrame:
     """
-    Orchestrates the pipeline: run all the add_* functions above in order
-    and return one feature table ready for modeling. Drop rows from each
-    team's first `window` matches of the dataset if their rolling-form
-    features end up NaN (no history yet) — decide on and document that
-    cutoff, don't just silently dropna() everything.
+    Run every feature function in order and return one table ready for
+    modeling: ID columns, the target, market probabilities, and features.
+
+    Design decisions:
+      - Warm-up: `warmup_seasons` (2015-16 by default) are included while
+        computing features, so Elo/form/H2H have real history by August
+        2016, then dropped from the output. That keeps 10 full seasons
+        (2016-17 to 2025-26) for training and testing.
+      - Promoted teams' first matches have no rolling form (no recent
+        top-flight history). Instead of dropping those rows, which would
+        mean the model never trains on matches it must still predict
+        every August, missing form is filled with PROMOTED_FORM_DEFAULTS.
+        This matches the Elo choice to start promoted teams below average.
+      - Same-match stats (goals, shots, corners) and raw odds are NOT in
+        the output. Goals and shots happen during the match, so using them
+        as features would leak the result.
+
+    Raises:
+        ValueError: if any feature is still missing after filling, so a
+            future change can't silently slip NaNs into the model.
     """
-    raise NotImplementedError
+    matches = matches.sort_values("date").reset_index(drop=True)
+
+    features = add_market_implied_probs(matches)
+    features = add_rolling_form(features)
+    features = add_rest_days(features)
+    features = compute_elo_ratings(features)
+    features = add_head_to_head(features)
+
+    for side in ["home", "away"]:
+        for stat, default in PROMOTED_FORM_DEFAULTS.items():
+            features[f"{side}_{stat}"] = features[f"{side}_{stat}"].fillna(default)
+
+    features = features[~features["season"].isin(warmup_seasons)]
+
+    missing = features[FEATURE_COLUMNS].isna().sum()
+    if missing.any():
+        raise ValueError(f"Missing feature values after filling: {missing[missing > 0].to_dict()}")
+
+    columns = ID_COLUMNS + [TARGET_COLUMN] + MARKET_COLUMNS + FEATURE_COLUMNS
+    return features[columns].reset_index(drop=True)
