@@ -273,12 +273,70 @@ def add_market_implied_probs(matches: pd.DataFrame) -> pd.DataFrame:
     return matches
 
 
-def build_feature_table(matches: pd.DataFrame) -> pd.DataFrame:
+# Columns that identify a match, kept for splitting and analysis (not features).
+ID_COLUMNS = ["date", "season", "home_team", "away_team"]
+TARGET_COLUMN = "result"
+# Market-implied probabilities: the benchmark to beat. Whether they ALSO go in
+# as model features is a separate Week 3 experiment, so they're kept apart.
+MARKET_COLUMNS = ["prob_home", "prob_draw", "prob_away"]
+FEATURE_COLUMNS = [
+    "home_form_pts", "home_form_goals_for", "home_form_goals_against",
+    "away_form_pts", "away_form_goals_for", "away_form_goals_against",
+    "home_rest_days", "away_rest_days",
+    "home_elo", "away_elo",
+    "h2h_pts",
+]
+
+# What a promoted team typically does in its first season back: per-game
+# averages over the 24 promoted team-seasons in the TRAINING seasons only
+# (2016-17 to 2023-24). Used when a team has no form history yet.
+PROMOTED_FORM_DEFAULTS = {"form_pts": 0.93, "form_goals_for": 1.00, "form_goals_against": 1.74}
+
+WARMUP_SEASONS = ("2015-16",)
+
+
+def build_feature_table(
+    matches: pd.DataFrame, warmup_seasons: tuple[str, ...] = WARMUP_SEASONS
+) -> pd.DataFrame:
     """
-    Orchestrates the pipeline: run all the add_* functions above in order
-    and return one feature table ready for modeling. Drop rows from each
-    team's first `window` matches of the dataset if their rolling-form
-    features end up NaN (no history yet) — decide on and document that
-    cutoff, don't just silently dropna() everything.
+    Run every feature function in order and return one table ready for
+    modeling: ID columns, the target, market probabilities, and features.
+
+    Design decisions:
+      - Warm-up: `warmup_seasons` (2015-16 by default) are included while
+        computing features, so Elo/form/H2H have real history by August
+        2016, then dropped from the output. That keeps 10 full seasons
+        (2016-17 to 2025-26) for training and testing.
+      - Promoted teams' first matches have no rolling form (no recent
+        top-flight history). Instead of dropping those rows, which would
+        mean the model never trains on matches it must still predict
+        every August, missing form is filled with PROMOTED_FORM_DEFAULTS.
+        This matches the Elo choice to start promoted teams below average.
+      - Same-match stats (goals, shots, corners) and raw odds are NOT in
+        the output. Goals and shots happen during the match, so using them
+        as features would leak the result.
+
+    Raises:
+        ValueError: if any feature is still missing after filling, so a
+            future change can't silently slip NaNs into the model.
     """
-    raise NotImplementedError
+    matches = matches.sort_values("date").reset_index(drop=True)
+
+    features = add_market_implied_probs(matches)
+    features = add_rolling_form(features)
+    features = add_rest_days(features)
+    features = compute_elo_ratings(features)
+    features = add_head_to_head(features)
+
+    for side in ["home", "away"]:
+        for stat, default in PROMOTED_FORM_DEFAULTS.items():
+            features[f"{side}_{stat}"] = features[f"{side}_{stat}"].fillna(default)
+
+    features = features[~features["season"].isin(warmup_seasons)]
+
+    missing = features[FEATURE_COLUMNS].isna().sum()
+    if missing.any():
+        raise ValueError(f"Missing feature values after filling: {missing[missing > 0].to_dict()}")
+
+    columns = ID_COLUMNS + [TARGET_COLUMN] + MARKET_COLUMNS + FEATURE_COLUMNS
+    return features[columns].reset_index(drop=True)
