@@ -18,6 +18,8 @@ from src.features.build_features import (
     add_market_implied_probs,
     add_rest_days,
     compute_elo_ratings,
+    add_rolling_form,
+
 )
 
 
@@ -96,10 +98,35 @@ def test_compute_elo_ratings_updates_after_a_win():
 
 
 def test_add_rolling_form_excludes_current_match():
-    """
-    TODO(evan): the most important test in this file. Construct a tiny
-    sequence of matches for one team and assert that the rolling-form
-    features for match N do NOT include match N's own result — only
-    matches strictly before it. This is the leakage check.
-    """
-    pass
+    # Team A plays four home matches: W 2-0, D 1-1, L 0-3, W 1-0
+    matches = pd.DataFrame({
+        "date": pd.to_datetime(["2024-08-01", "2024-08-08", "2024-08-15", "2024-08-22"]),
+        "home_team": ["A", "A", "A", "A"],
+        "away_team": ["B", "C", "D", "E"],
+        "home_goals": [2, 1, 0, 1],
+        "away_goals": [0, 1, 3, 0],
+    })
+    result = add_rolling_form(matches, window=2)
+
+    # not enough history yet -> NaN
+    assert pd.isna(result.loc[0, "home_form_pts"])
+    assert pd.isna(result.loc[1, "home_form_pts"])
+    # match 2 uses matches 0 and 1 only: points (3+1)/2, goals for (2+1)/2, against (0+1)/2
+    assert result.loc[2, "home_form_pts"] == pytest.approx(2.0)
+    assert result.loc[2, "home_form_goals_for"] == pytest.approx(1.5)
+    assert result.loc[2, "home_form_goals_against"] == pytest.approx(0.5)
+    # match 3 uses matches 1 and 2: points (1+0)/2
+    assert result.loc[3, "home_form_pts"] == pytest.approx(0.5)
+def test_add_rolling_form_resets_after_long_gap():
+    matches = pd.DataFrame({
+        "date": pd.to_datetime(["2024-01-01", "2024-01-08", "2024-01-15",
+                                "2024-12-01", "2024-12-08"]),
+        "home_team": ["A"] * 5,
+        "away_team": ["B", "C", "D", "E", "F"],
+        "home_goals": [1, 1, 1, 1, 1],
+        "away_goals": [0, 0, 0, 0, 0],
+    })
+    result = add_rolling_form(matches, window=2)
+    assert result.loc[2, "home_form_pts"] == pytest.approx(3.0)   # normal: two wins before
+    assert pd.isna(result.loc[3, "home_form_pts"])                # 321-day gap -> history reset
+    assert pd.isna(result.loc[4, "home_form_pts"])                # only one match in the new stint

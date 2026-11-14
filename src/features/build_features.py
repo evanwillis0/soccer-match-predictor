@@ -17,7 +17,7 @@ answer into your own training data.
 import pandas as pd
 
 
-def add_rolling_form(matches: pd.DataFrame, window: int = 5) -> pd.DataFrame:
+def add_rolling_form(matches: pd.DataFrame, window: int = 5, max_gap_days: int = 120) -> pd.DataFrame:
     """
     Add columns for each team's form over their last `window` matches, computed
     *before* the current match: points earned (3/1/0), goals scored, goals
@@ -39,7 +39,36 @@ def add_rolling_form(matches: pd.DataFrame, window: int = 5) -> pd.DataFrame:
     Returns:
         matches with new form columns added
     """
-    raise NotImplementedError
+    matches = matches.copy()
+    home = pd.DataFrame({"match_id": matches.index, "date": matches["date"],
+                         "team": matches["home_team"], "side": "home",
+                         "goals_for": matches["home_goals"],
+                         "goals_against": matches["away_goals"]})
+    away = pd.DataFrame({"match_id": matches.index, "date": matches["date"],
+                         "team": matches["away_team"], "side": "away",
+                         "goals_for": matches["away_goals"],
+                         "goals_against": matches["home_goals"]})
+    long = pd.concat([home, away], ignore_index=True)
+    long["points"] = (3 * (long["goals_for"] > long["goals_against"])
+                      + 1 * (long["goals_for"] == long["goals_against"]))
+    long = long.sort_values(["team", "date"])
+    gap = long.groupby("team")["date"].diff().dt.days
+    long["stint"] = (gap > max_gap_days).groupby(long["team"]).cumsum()
+
+    stats = ["points", "goals_for", "goals_against"]
+    form = long.groupby(["team", "stint"])[stats].transform(
+        lambda s: s.shift(1).rolling(window).mean()
+    )
+    form = form.rename(columns={"points": "form_pts",
+                                "goals_for": "form_goals_for",
+                                "goals_against": "form_goals_against"})
+    long = long.join(form)
+
+    for side in ["home", "away"]:
+        part = long[long["side"] == side].set_index("match_id")[list(form.columns)]
+        part.columns = [f"{side}_{c}" for c in part.columns]
+        matches = matches.join(part)
+    return matches
 
 
 def add_head_to_head(matches: pd.DataFrame, lookback: int = 5) -> pd.DataFrame:
