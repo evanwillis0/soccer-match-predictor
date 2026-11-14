@@ -26,8 +26,11 @@ BASE_URL = "https://www.football-data.co.uk/mmz4281/{season}/{league}.csv"
 LEAGUE_CODE = "E0"
 
 # Season codes are two two-digit years concatenated, e.g. "2425" = 2024-25.
-# Default: the 10 most recently *completed* EPL seasons as of Sep 2026.
+# Default: the 10 most recently *completed* EPL seasons as of Sep 2026, plus
+# 2015-16 as a warm-up season. Warm-up matches build Elo/form/H2H history
+# but are dropped from the feature table (see build_feature_table).
 DEFAULT_SEASONS = [
+    "1516",
     "1617", "1718", "1819", "1920", "2021",
     "2122", "2223", "2324", "2425", "2526",
 ]
