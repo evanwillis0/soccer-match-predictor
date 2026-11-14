@@ -151,7 +151,7 @@ def compute_elo_ratings(
     k: float = 20.0,
     initial_rating: float = 1500.0,
     home_advantage: float = 60.0,
-    season_regression: float = 0.33,
+    season_regression: float = 0.0,
 ) -> pd.DataFrame:
     """
     Compute a running Elo rating for every team and attach each match's
@@ -178,8 +178,11 @@ def compute_elo_ratings(
     Design decisions (see README "Key design decisions"):
       - Draws count as 0.5 for both sides. Elo's job is measuring strength;
         predicting draws is left to the classifier.
-      - Between seasons, every rating is pulled `season_regression` of the
-        way back toward `initial_rating` (summer transfers, manager changes).
+      - Between seasons, every rating can be pulled `season_regression` of
+        the way back toward `initial_rating` (summer transfers, manager
+        changes). Defaults K=20, home_advantage=60, season_regression=0
+        (carry over fully) were chosen by grid search on the training
+        seasons; see notebooks/02_elo_tuning.ipynb.
       - Promoted teams (any team not in the previous season, including
         teams returning after relegation) start at the average rating of
         the teams that left the league, after regression. The new season's
