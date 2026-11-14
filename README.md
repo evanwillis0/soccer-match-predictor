@@ -36,7 +36,8 @@ soccer-match-predictor/
 │   ├── raw/            # untouched season CSVs from football-data.co.uk
 │   └── processed/      # matches.csv — cleaned, consolidated, chronological
 ├── notebooks/
-│   └── 01_eda.ipynb    # Week 1: exploratory analysis
+│   ├── 01_eda.ipynb    # Week 1: exploratory analysis
+│   └── 02_elo_tuning.ipynb  # Week 2: choosing Elo's K, home advantage, summer regression
 ├── src/
 │   ├── data/            # download + clean scripts
 │   ├── features/         # feature engineering (form, rest, Elo, head-to-head, market probs)
@@ -59,11 +60,10 @@ pip install -r requirements.txt
 - [x] **Week 1 — Data & EDA:** download + clean the season CSVs, explore
       outcome distribution, home advantage, goals distribution, and how
       well-calibrated the betting market already is (`notebooks/01_eda.ipynb`)
-- [ ] **Week 2 — Feature engineering:** rolling team form, head-to-head
+- [x] **Week 2 — Feature engineering:** rolling team form, head-to-head
       history, rest days, a from-scratch Elo rating system, and
-      market-implied probabilities (`src/features/build_features.py`).
-      *All features built and tested; tuning Elo's K and season
-      regression remains.*
+      market-implied probabilities (`src/features/build_features.py`),
+      with Elo settings tuned in `notebooks/02_elo_tuning.ipynb`
 - [ ] **Week 3 — Modeling:** chronological train/val/test split; baselines
       (majority class, market odds); logistic regression → random forest →
       XGBoost, evaluated on accuracy and log loss (`src/models/`)
@@ -91,7 +91,7 @@ Every feature uses only information available before kickoff
 |---|---|---|
 | Rolling form | `home/away_form_pts`, `_goals_for`, `_goals_against` | Per-game averages over each team's last 5 matches (any venue) |
 | Rest days | `home/away_rest_days` | Days since each team's previous match, capped at 14 |
-| Elo rating | `home_elo`, `away_elo` | Pre-match ratings from a from-scratch Elo system (K=20, home advantage 60) |
+| Elo rating | `home_elo`, `away_elo` | Pre-match ratings from a from-scratch Elo system (K=20, home advantage 60, no summer pull-back; all tuned on training seasons) |
 | Head-to-head | `h2h_pts` | Home team's average points in its last 5 meetings with this opponent, shrunk toward the league average |
 | Market (benchmark) | `prob_home/draw/away` | Bet365 implied probabilities with the overround removed. Kept apart from the features: it's the baseline to beat |
 
@@ -111,8 +111,18 @@ Every feature uses only information available before kickoff
 
 - **Draws count as half a win for both teams.**
   The Elo rates draws differently for each team depending on the current Elo of the teams that drew. If a lower-Elo team drew with a higher-Elo team, the lower Elo would go up and vice versa for the higher. Keeping the chess convention is fine because Elo's job is to measure team strength, not to predict draws. Draws being common is handled later by the classifier, which can learn that evenly rated matchups draw more often.
-- **Ratings move partway back toward 1500 each summer (33%).**
-  A carried-over rating ignores any summer changes to the team such as manager, injuries, signings, or other circumstances, assuming the team is in the exact same form it was in the past season. Most of the time this isn't true, so moving the Elo toward average at the start, to be safe and account for these changes, lets the Elo adjust as needed based on results from the current season as teams' in-season form is determined. 
+- **Settings were tuned, not guessed.** A grid search over 252 combinations
+  of K (10–40), home advantage (30–105) and summer regression (0–1),
+  scored by the Brier score of Elo's expected score on the training
+  seasons only (leak-free, because each pre-match rating uses only earlier
+  matches). Best: K=20, home advantage=60, regression=0, with a Brier score of
+  0.1554, against 0.1570 for the original placeholders and 0.1892 for a
+  no-skill constant prediction. See `notebooks/02_elo_tuning.ipynb`.
+- **Ratings carry over fully between seasons. The data rejected our
+  original idea.**
+  *Original hypothesis:* a carried-over rating ignores any summer changes to the team such as manager, injuries, signings, or other circumstances, assuming the team is in the exact same form it was in the past season. Most of the time this isn't true, so moving the Elo toward average at the start, to be safe and account for these changes, lets the Elo adjust as needed based on results from the current season as teams' in-season form is determined.
+  *What the data showed:* 
+  The data showed that as we increased the summer regression, the error rose as well, concluding that a full carry-over of a team's rating after the summer is the best setting on the training seasons. Big clubs really don't change enough over the summer to drastically affect their Elo to the point that it needs to be moved towards average. Newly promoted teams already inherit the relegated teams' average rating, so the Elo comparison between the bottom and top is still preserved and does not need to be reset.
 - **Promoted teams inherit the relegated teams' average rating.**
   Promoted teams inherit the relegated average rating, as promoted teams averaged 0.91 pts/game compared to the league average of 1.38, so it's safe to assume that the promoted teams' Elo would be close to that of the relegated team, as 13 of 24 promoted teams in the past 10 years went straight back down. This inheritance also keeps the league average Elo around 1500, as the teams' Elo ratings are replaced, so the average holds.
 
