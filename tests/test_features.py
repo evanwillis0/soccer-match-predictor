@@ -19,7 +19,7 @@ from src.features.build_features import (
     add_rest_days,
     compute_elo_ratings,
     add_rolling_form,
-
+    add_head_to_head,
 )
 
 
@@ -165,3 +165,42 @@ def test_add_rolling_form_resets_after_long_gap():
     assert result.loc[2, "home_form_pts"] == pytest.approx(3.0)   # normal: two wins before
     assert pd.isna(result.loc[3, "home_form_pts"])                # 321-day gap -> history reset
     assert pd.isna(result.loc[4, "home_form_pts"])                # only one match in the new stint
+
+# Head-to-head tests use prior_pts=1.5, prior_weight=2 so the shrinkage
+# math is easy by hand: h2h_pts = (H2H points + 3) / (meetings + 2)
+
+def test_add_head_to_head_no_history_returns_prior():
+    matches = pd.DataFrame({
+        "home_team": ["A"], "away_team": ["B"], "home_goals": [2], "away_goals": [0],
+    })
+    result = add_head_to_head(matches, prior_pts=1.5, prior_weight=2)
+    # first meeting: its own result must not count, so we get exactly the prior
+    assert result.loc[0, "h2h_pts"] == pytest.approx(1.5)
+
+
+def test_add_head_to_head_any_venue_and_shrinkage():
+    matches = pd.DataFrame({
+        "home_team":  ["A", "C", "B", "A"],
+        "away_team":  ["B", "D", "A", "B"],
+        "home_goals": [2,   5,   1,   0],
+        "away_goals": [0,   0,   1,   0],
+    })
+    result = add_head_to_head(matches, prior_pts=1.5, prior_weight=2)
+    # match 2, B at home: B lost the only prior meeting (away at A) -> (0 + 3) / 3
+    assert result.loc[2, "h2h_pts"] == pytest.approx(1.0)
+    # match 3, A at home: won 3 + drew 1 = 4 points in 2 meetings -> (4 + 3) / 4
+    assert result.loc[3, "h2h_pts"] == pytest.approx(1.75)
+    # the unrelated C vs D match doesn't leak into the A/B history
+    assert result.loc[1, "h2h_pts"] == pytest.approx(1.5)
+
+
+def test_add_head_to_head_respects_lookback():
+    matches = pd.DataFrame({
+        "home_team":  ["A", "A", "A"],
+        "away_team":  ["B", "B", "B"],
+        "home_goals": [3,   0,   1],
+        "away_goals": [0,   2,   1],
+    })
+    result = add_head_to_head(matches, lookback=1, prior_pts=1.5, prior_weight=2)
+    # only the most recent meeting (A lost) counts: (0 + 3) / 3, the earlier win is forgotten
+    assert result.loc[2, "h2h_pts"] == pytest.approx(1.0)
