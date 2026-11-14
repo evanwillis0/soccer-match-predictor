@@ -20,6 +20,9 @@ from src.features.build_features import (
     compute_elo_ratings,
     add_rolling_form,
     add_head_to_head,
+    build_feature_table,
+    FEATURE_COLUMNS,
+    PROMOTED_FORM_DEFAULTS,
 )
 
 
@@ -204,3 +207,36 @@ def test_add_head_to_head_respects_lookback():
     result = add_head_to_head(matches, lookback=1, prior_pts=1.5, prior_weight=2)
     # only the most recent meeting (A lost) counts: (0 + 3) / 3, the earlier win is forgotten
     assert result.loc[2, "h2h_pts"] == pytest.approx(1.0)
+
+
+def _tiny_two_season_table():
+    # warm-up season "w": A beats B. Next season "s": B relegated, C promoted.
+    return pd.DataFrame({
+        "date": pd.to_datetime(["2015-08-08", "2016-08-13"]),
+        "season": ["w", "s"],
+        "home_team": ["A", "A"], "away_team": ["B", "C"],
+        "home_goals": [2, 1], "away_goals": [0, 1], "result": ["H", "D"],
+        "home_shots": [12, 9], "away_shots": [5, 7],     # same-match stats
+        "odds_home": [2.0, 2.0], "odds_draw": [4.0, 4.0], "odds_away": [4.0, 4.0],
+    })
+
+
+def test_build_feature_table_drops_warmup_but_keeps_its_history():
+    result = build_feature_table(_tiny_two_season_table(), warmup_seasons=("w",))
+    assert list(result["season"]) == ["s"]           # warm-up rows are gone...
+    assert result.loc[0, "home_elo"] > 1500          # ...but A's warm-up win still counts
+
+
+def test_build_feature_table_excludes_leaky_columns():
+    result = build_feature_table(_tiny_two_season_table(), warmup_seasons=("w",))
+    for leaky in ["home_goals", "away_goals", "home_shots", "away_shots"]:
+        assert leaky not in result.columns
+    assert set(FEATURE_COLUMNS) <= set(result.columns)
+
+
+def test_build_feature_table_fills_promoted_team_form():
+    result = build_feature_table(_tiny_two_season_table(), warmup_seasons=("w",))
+    # C has no history at all, so it gets the promoted-team defaults
+    assert result.loc[0, "away_form_pts"] == pytest.approx(PROMOTED_FORM_DEFAULTS["form_pts"])
+    assert result.loc[0, "away_form_goals_against"] == pytest.approx(PROMOTED_FORM_DEFAULTS["form_goals_against"])
+    assert not result[FEATURE_COLUMNS].isna().any().any()
