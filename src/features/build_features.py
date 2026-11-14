@@ -106,6 +106,7 @@ def compute_elo_ratings(
     k: float = 20.0,
     initial_rating: float = 1500.0,
     home_advantage: float = 60.0,
+    season_regression: float = 0.33,
 ) -> pd.DataFrame:
     """
     Compute a running Elo rating for every team and attach each match's
@@ -129,16 +130,72 @@ def compute_elo_ratings(
     (pre-update) ratings as that match's `home_elo`/`away_elo` features,
     THEN apply the update for the next match.
 
+    Design decisions (see README "Key design decisions"):
+      - Draws count as 0.5 for both sides. Elo's job is measuring strength;
+        predicting draws is left to the classifier.
+      - Between seasons, every rating is pulled `season_regression` of the
+        way back toward `initial_rating` (summer transfers, manager changes).
+      - Promoted teams (any team not in the previous season, including
+        teams returning after relegation) start at the average rating of
+        the teams that left the league, after regression. The new season's
+        team list is known before it kicks off, so this isn't leakage.
+        Because Elo updates are zero-sum and newcomers replace leavers one
+        for one, the league-average rating stays at `initial_rating`.
+      - Teams in the first season of the dataset all start at `initial_rating`.
+
     Args:
-        matches: chronologically-sorted match table
+        matches: chronologically-sorted match table. Uses the `season`
+            column to detect season boundaries; without one, all matches
+            are treated as a single season.
         k: how much a single result moves a team's rating (higher = more volatile)
         initial_rating: starting rating for a team with no history
         home_advantage: rating points added to the home team's effective rating
+        season_regression: fraction (0-1) of the way each rating moves back
+            toward `initial_rating` between seasons. 0 = carry over fully.
 
     Returns:
         matches with `home_elo` and `away_elo` columns added
     """
-    raise NotImplementedError
+    matches = matches.copy()
+    seasons = matches["season"] if "season" in matches.columns else pd.Series(0, index=matches.index)
+    actual_home = {"H": 1.0, "D": 0.5, "A": 0.0}
+
+    ratings: dict[str, float] = {}
+    home_elo, away_elo = [], []
+    current_season = None
+
+    for season, home, away, result in zip(
+        seasons, matches["home_team"], matches["away_team"], matches["result"]
+    ):
+        if season != current_season:
+            if current_season is not None:
+                # Season boundary: regress everyone toward the mean, then
+                # swap leavers for newcomers.
+                in_league = seasons == season
+                new_teams = set(matches.loc[in_league, "home_team"]) | set(matches.loc[in_league, "away_team"])
+                ratings = {t: initial_rating + (1 - season_regression) * (r - initial_rating)
+                           for t, r in ratings.items()}
+                leavers = [ratings[t] for t in ratings if t not in new_teams]
+                newcomer_rating = sum(leavers) / len(leavers) if leavers else initial_rating
+                ratings = {t: ratings.get(t, newcomer_rating) for t in new_teams}
+            current_season = season
+
+        home_rating = ratings.setdefault(home, initial_rating)
+        away_rating = ratings.setdefault(away, initial_rating)
+
+        # Record PRE-match ratings as this match's features...
+        home_elo.append(home_rating)
+        away_elo.append(away_rating)
+
+        # ...THEN update for future matches.
+        expected_home = 1 / (1 + 10 ** ((away_rating - (home_rating + home_advantage)) / 400))
+        change = k * (actual_home[result] - expected_home)
+        ratings[home] = home_rating + change
+        ratings[away] = away_rating - change
+
+    matches["home_elo"] = home_elo
+    matches["away_elo"] = away_elo
+    return matches
 
 
 def add_market_implied_probs(matches: pd.DataFrame) -> pd.DataFrame:

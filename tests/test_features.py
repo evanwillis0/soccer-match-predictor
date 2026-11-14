@@ -79,22 +79,57 @@ def test_add_rest_days_caps_long_gaps():
     result = add_rest_days(matches)
     assert result.loc[1, "home_rest_days"] == 14       # a 60-day gap is capped
 
+# Hand-calculated Elo change when two 1500 teams meet and the HOME team wins
+# (k=20, home_advantage=60):
+#   E_home = 1 / (1 + 10 ** ((1500 - 1560) / 400)) = 0.58550
+#   change = 20 * (1 - 0.58550) = 8.2900
+HOME_WIN_CHANGE = 20 * (1 - 1 / (1 + 10 ** (-60 / 400)))
+
+
 def test_compute_elo_ratings_first_match_uses_initial_rating():
-    """
-    TODO(evan): flesh this out once compute_elo_ratings is implemented.
-    A team's very first match in the dataset should get `initial_rating`
-    as its pre-match Elo (there's no history yet to have moved it).
-    """
-    pass
+    matches = pd.DataFrame({
+        "home_team": ["A"], "away_team": ["B"], "result": ["H"],
+    })
+    result = compute_elo_ratings(matches)
+    # pre-match ratings: the match's own result must not have moved them
+    assert result.loc[0, "home_elo"] == pytest.approx(1500.0)
+    assert result.loc[0, "away_elo"] == pytest.approx(1500.0)
 
 
 def test_compute_elo_ratings_updates_after_a_win():
-    """
-    TODO(evan): build a 2-row synthetic dataset for the same two teams
-    (Team A beats Team B in match 1), and assert Team A's Elo going into
-    match 2 is HIGHER than initial_rating, and Team B's is LOWER.
-    """
-    pass
+    matches = pd.DataFrame({
+        "home_team": ["A", "A"], "away_team": ["B", "B"], "result": ["H", "D"],
+    })
+    result = compute_elo_ratings(matches)
+    assert result.loc[1, "home_elo"] > 1500
+    assert result.loc[1, "away_elo"] < 1500
+    assert result.loc[1, "home_elo"] == pytest.approx(1500 + HOME_WIN_CHANGE)
+    # zero-sum: A gains exactly what B loses
+    assert result.loc[1, "away_elo"] == pytest.approx(1500 - HOME_WIN_CHANGE)
+
+
+def test_compute_elo_ratings_regresses_between_seasons():
+    matches = pd.DataFrame({
+        "season": ["s1", "s2"],
+        "home_team": ["A", "A"], "away_team": ["B", "B"], "result": ["H", "H"],
+    })
+    result = compute_elo_ratings(matches, season_regression=0.5)
+    # A ended s1 at 1500 + change; half of that gain is wiped over the summer
+    assert result.loc[1, "home_elo"] == pytest.approx(1500 + 0.5 * HOME_WIN_CHANGE)
+    assert result.loc[1, "away_elo"] == pytest.approx(1500 - 0.5 * HOME_WIN_CHANGE)
+
+
+def test_compute_elo_ratings_promoted_team_inherits_relegated_rating():
+    # B plays only in s1 (relegated); C appears in s2 (promoted)
+    matches = pd.DataFrame({
+        "season": ["s1", "s2"],
+        "home_team": ["A", "A"], "away_team": ["B", "C"], "result": ["H", "H"],
+    })
+    result = compute_elo_ratings(matches, season_regression=0.5)
+    # C starts at B's regressed end-of-season rating, not at 1500
+    assert result.loc[1, "away_elo"] == pytest.approx(1500 - 0.5 * HOME_WIN_CHANGE)
+    # ...which keeps the league average at exactly 1500
+    assert (result.loc[1, "home_elo"] + result.loc[1, "away_elo"]) / 2 == pytest.approx(1500)
 
 
 def test_add_rolling_form_excludes_current_match():
