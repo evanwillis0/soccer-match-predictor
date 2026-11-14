@@ -14,6 +14,8 @@ a team's *entire* history including future matches, or you'll leak the
 answer into your own training data.
 """
 
+from collections import defaultdict, deque
+
 import pandas as pd
 
 
@@ -71,14 +73,57 @@ def add_rolling_form(matches: pd.DataFrame, window: int = 5, max_gap_days: int =
     return matches
 
 
-def add_head_to_head(matches: pd.DataFrame, lookback: int = 5) -> pd.DataFrame:
+def add_head_to_head(
+    matches: pd.DataFrame,
+    lookback: int = 5,
+    prior_pts: float = 1.39,
+    prior_weight: float = 2.0,
+) -> pd.DataFrame:
     """
-    Add a feature summarizing the home team's results in their last
-    `lookback` meetings against this specific opponent (e.g. average points
-    earned in that head-to-head history). Same leakage rule applies: only
+    Add `h2h_pts`: the home team's average points (3/1/0) in its last
+    `lookback` meetings with this opponent, at any venue, using only
     matches strictly before the current one.
+
+    Thin histories (promoted teams, or the dataset starting in 2016) are
+    handled by shrinking toward the league average, as if every pair had
+    `prior_weight` extra meetings that each earned `prior_pts`:
+
+        h2h_pts = (sum of H2H points + prior_pts * prior_weight) / (meetings + prior_weight)
+
+    So 0 meetings -> exactly `prior_pts`, a single win doesn't look like
+    dominance, and 5 meetings are mostly trusted. The value is always
+    defined, so there are no NaN rows to drop.
+
+    Design decisions:
+      - Any venue, not same-venue only: roughly double the sample, and home
+        advantage is already captured by Elo.
+      - prior_pts = 1.39 is league-average points per team per game on the
+        TRAINING seasons only (2016-17 to 2023-24), equal to
+        (3 - draw rate) / 2.
     """
-    raise NotImplementedError
+    matches = matches.copy()
+    history: dict[frozenset, deque] = defaultdict(lambda: deque(maxlen=lookback))
+    h2h_pts = []
+
+    for home, away, home_goals, away_goals in zip(
+        matches["home_team"], matches["away_team"], matches["home_goals"], matches["away_goals"]
+    ):
+        past = history[frozenset((home, away))]
+
+        # Feature from PAST meetings only...
+        earned = sum(meeting[home] for meeting in past)
+        h2h_pts.append((earned + prior_pts * prior_weight) / (len(past) + prior_weight))
+
+        # ...THEN record this meeting for future ones.
+        if home_goals > away_goals:
+            past.append({home: 3, away: 0})
+        elif home_goals < away_goals:
+            past.append({home: 0, away: 3})
+        else:
+            past.append({home: 1, away: 1})
+
+    matches["h2h_pts"] = h2h_pts
+    return matches
 
 
 def add_rest_days(matches: pd.DataFrame, max_rest_days = 14) -> pd.DataFrame:
